@@ -1,0 +1,72 @@
+name: Sync Master with Upstream
+
+on:
+  schedule:
+    - cron: '0 03-23/6 * * *'  # 毎日6時間毎
+  workflow_dispatch:  # 手動実行用
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    env:
+      ORIGINAL_OWNER: "fcitx"
+      ORIGINAL_REPOSITORY: "mozc"
+
+    steps:
+      - name: Configure Git
+        run: |
+          git config --global user.name "Masato TOYOSHIMA"
+          git config --global user.email phoepsilonix@phoepsilonix.love
+          git config --global url.git@github.com:.insteadOf https://github.com/
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "${{ secrets.MOZC_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          eval $(ssh-agent -s)
+          ssh-add ~/.ssh/id_ed25519
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+          git clone -b sync-upstream --filter=tree:0 --no-single-branch https://github.com/TachiBanaHime/fcitx-mozc.git fcitx-mozc
+
+      - name: Fetch upstream
+        run: |
+          cd fcitx-mozc
+          git remote add upstream https://github.com/$ORIGINAL_OWNER/$ORIGINAL_REPOSITORY.git
+          git fetch --prune --filter=tree:0 upstream fcitx
+
+      - name: Check for changes
+        id: check_changes
+        run: |
+          cd fcitx-mozc
+          if [ -n "$(git diff origin/fcitx upstream/fcitx)" ] || [ -n "$(git diff sync-upstream~1 upstream/fcitx)" ]; then
+            echo "Changes detected"
+            echo "changes_detected=true" >> $GITHUB_OUTPUT
+          else
+            echo "No changes detected"
+            echo "changes_detected=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Sync fcitx branch
+        if: steps.check_changes.outputs.changes_detected == 'true'
+        run: |
+          cd fcitx-mozc
+          git checkout -b fcitx --track origin/fcitx
+          git reset --hard upstream/fcitx
+          git push origin fcitx --force
+
+          git checkout sync-upstream
+          if [ -z "$(git diff sync-upstream~..upstream/fcitx)" ]; then
+            echo "No changes detected. Exiting."
+          else
+            git reset --hard upstream/fcitx
+            echo "Ensuring sync-branch.yaml exists..."
+            if [ ! -f .github/workflows/sync-upstream.yaml ]; then
+              echo "Restoring sync-branch.yaml from previous commit..."
+              git checkout HEAD@{1} -- .github/workflows/sync-upstream.yaml
+              git add .github/workflows/sync-upstream.yaml
+              git commit -m "Restore sync-upstream.yaml"
+            fi
+          fi
+          git push origin sync-upstream --force
